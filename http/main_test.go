@@ -201,3 +201,29 @@ func TestClientTLS(t *testing.T) {
 			http.StatusOK, resp.StatusCode)
 	}
 }
+
+func TestClientTLSGoogle(t *testing.T) {
+
+	dialer := &net.Dialer{
+		Timeout: time.Second * 30,
+	}
+
+	tlsCong := tls.Config{
+		CurvePreferences: []tls.CurveID{tls.CurveP256},
+		MinVersion:       tls.VersionTLS12,
+	}
+
+	conn, err := tls.DialWithDialer(dialer, "tcp", "www.google.com:443", &tlsCong)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// TLS details about the connection
+	state := conn.ConnectionState()
+
+	t.Logf("TLS 1.%d", state.Version-tls.VersionTLS10)
+	t.Log(tls.CipherSuiteName(state.CipherSuite))
+	t.Log(state.VerifiedChains[0][0].Issuer.Organization[0])
+
+	_ = conn.Close()
+}
