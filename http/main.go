@@ -2,10 +2,18 @@ package main
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"fmt"
+	"math/big"
 	"net"
 	"net/http"
+	"os"
 	"path"
 	"strings"
 	"time"
@@ -157,4 +165,90 @@ func (s *Server) ServeTLS(l net.Listener, cert, key string) error {
 			}
 		}()
 	}
+}
+
+func generatingCertificate(hosts []string) error {
+
+	//generates a random number between [0,max-1], here it is [0,1*2^128]
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		return fmt.Errorf("generating int: %w", err)
+	}
+
+	notBefore := time.Now()
+
+	template := x509.Certificate{
+		SerialNumber: serial,
+		Subject: pkix.Name{
+			Organization: []string{"Foo Bar"},
+		},
+
+		NotBefore: notBefore,
+		NotAfter:  notBefore.Add(10 * 365 * 24 * time.Hour),
+		KeyUsage: x509.KeyUsageKeyEncipherment |
+			x509.KeyUsageDigitalSignature |
+			x509.KeyUsageCertSign,
+		ExtKeyUsage: []x509.ExtKeyUsage{
+			x509.ExtKeyUsageServerAuth,
+			x509.ExtKeyUsageClientAuth,
+		},
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+
+	for _, host := range hosts {
+		if ip := net.ParseIP(host); ip != nil {
+			//if its IP address
+			template.IPAddresses = append(template.IPAddresses, ip)
+		} else {
+			//anything else
+			template.DNSNames = append(template.DNSNames, host)
+		}
+	}
+
+	private, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return fmt.Errorf("generate private key: %w", err)
+	}
+
+	der, err := x509.CreateCertificate(rand.Reader, &template, &template, &private.PublicKey, private)
+	if err != nil {
+		return fmt.Errorf("generating certificate: %w", err)
+	}
+
+	//create a file
+	certFile, err := os.Create("cert.pem")
+	if err != nil {
+		return fmt.Errorf("create cert file: %w", err)
+	}
+	defer certFile.Close()
+
+	if err := pem.Encode(certFile, &pem.Block{Type: "CERTIFICATE", Bytes: der}); err != nil {
+		return fmt.Errorf("encode into pem: %w", err)
+	}
+
+	fmt.Println("wrote cert.pem")
+
+	keyFile, err := os.OpenFile("key.pem", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	if err != nil {
+		return fmt.Errorf("create key file: %w", err)
+	}
+
+	defer keyFile.Close()
+
+	privateBS, err := x509.MarshalPKCS8PrivateKey(private)
+	if err != nil {
+		return fmt.Errorf("private key byte slice: %w", err)
+	}
+
+	if err := pem.Encode(keyFile, &pem.Block{Type: "EC PRIVATE KEY", Bytes: privateBS}); err != nil {
+		return fmt.Errorf("encode private key into pem: %w", err)
+	}
+
+	fmt.Println("wrote key.pem")
+	return nil
+}
+
+func main() {
+	generatingCertificate([]string{"localhost"})
 }
