@@ -1,12 +1,16 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -226,4 +230,85 @@ func TestClientTLSGoogle(t *testing.T) {
 	t.Log(state.VerifiedChains[0][0].Issuer.Organization[0])
 
 	_ = conn.Close()
+}
+
+func TestEchoTLSServer(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	serverAddr := "localhost:34443"
+	maxIdle := time.Second
+	server := NewTLSServer(ctx, serverAddr, maxIdle, nil)
+
+	done := make(chan struct{})
+
+	go func() {
+		err := server.ListenAndServeTLS("cert.pem", "key.pem")
+		if err != nil {
+			t.Error(err)
+			return
+		}
+
+		done <- struct{}{}
+
+	}()
+	//waits for server to become ready
+	server.Ready()
+
+	//pinning certificate
+	cert, err := os.ReadFile("cert.pem")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	//create a cert pool
+	certPool := x509.NewCertPool()
+	if ok := certPool.AppendCertsFromPEM(cert); !ok {
+		t.Fatalf("failed to append certificate into pool: %s", err)
+	}
+
+	tlsConfig := &tls.Config{
+		CurvePreferences: []tls.CurveID{tls.CurveP256},
+		MinVersion:       tls.VersionTLS12,
+		RootCAs:          certPool,
+	}
+
+	// pass tls.Dial the tls.Config with the pinned server certificate 1.
+	// Your TLS client authenticates the server’s certificate without having
+	// to resort to using InsecureSkipVerify and all the insecurity that option
+	// introduces.
+	conn, err := tls.Dial("tcp", serverAddr, tlsConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	hello := []byte("hello")
+	_, err = conn.Write(hello)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	bs := make([]byte, 1024)
+	n, err := conn.Read(bs)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !bytes.Equal(bs[:n], hello) {
+		t.Fatalf("expected %q; actual %q", hello, bs[:n])
+	}
+
+	time.Sleep(2 * maxIdle)
+
+	_, err = conn.Read(bs)
+	if err != io.EOF {
+		t.Fatal(err)
+	}
+
+	if err := conn.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	cancel()
+	<-done
 }
