@@ -167,7 +167,7 @@ func (s *Server) ServeTLS(l net.Listener, cert, key string) error {
 	}
 }
 
-func generatingCertificate(hosts []string) error {
+func generatingCertificate(hosts []string, certFilename, privateFilename string) error {
 
 	//generates a random number between [0,max-1], here it is [0,1*2^128]
 	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
@@ -217,7 +217,7 @@ func generatingCertificate(hosts []string) error {
 	}
 
 	//create a file
-	certFile, err := os.Create("cert.pem")
+	certFile, err := os.Create(certFilename)
 	if err != nil {
 		return fmt.Errorf("create cert file: %w", err)
 	}
@@ -227,9 +227,9 @@ func generatingCertificate(hosts []string) error {
 		return fmt.Errorf("encode into pem: %w", err)
 	}
 
-	fmt.Println("wrote cert.pem")
+	fmt.Println("wrote", certFilename)
 
-	keyFile, err := os.OpenFile("key.pem", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	keyFile, err := os.OpenFile(privateFilename, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
 	if err != nil {
 		return fmt.Errorf("create key file: %w", err)
 	}
@@ -245,10 +245,11 @@ func generatingCertificate(hosts []string) error {
 		return fmt.Errorf("encode private key into pem: %w", err)
 	}
 
-	fmt.Println("wrote key.pem")
+	fmt.Println("wrote", privateFilename)
 	return nil
 }
 
 func main() {
-	generatingCertificate([]string{"localhost"})
+	generatingCertificate([]string{"localhost"}, "serverCert.pem", "serverPrivate.pem")
+	generatingCertificate([]string{"localhost"}, "clientCert.pem", "clientPrivate.pem")
 }

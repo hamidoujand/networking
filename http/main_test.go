@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -311,4 +312,187 @@ func TestEchoTLSServer(t *testing.T) {
 
 	cancel()
 	<-done
+}
+
+// Both the client and server use the caCertPool function to create a new
+// X.509 certificate pool.
+// The certificate pool serves as a source of trusted certificates. The client puts
+// the server’s certificate in its certificate pool, and vice versa
+func caCertPool(cert string) (*x509.CertPool, error) {
+	bs, err := os.ReadFile(cert)
+	if err != nil {
+		return nil, fmt.Errorf("readFile: %w", err)
+	}
+
+	certPool := x509.NewCertPool()
+	if ok := certPool.AppendCertsFromPEM(bs); !ok {
+		return nil, errors.New("failed to add certificate into pool")
+	}
+
+	return certPool, nil
+}
+
+func TestMutualTLSAuthentication(t *testing.T) {
+	generatingCertificate([]string{"localhost"}, "serverCert.pem", "serverPrivate.pem")
+	generatingCertificate([]string{"localhost"}, "clientCert.pem", "clientPrivate.pem")
+
+	defer func() {
+		_ = os.Remove("serverCert.pem")
+		_ = os.Remove("clientCert.pem")
+		_ = os.Remove("serverPrivate.pem")
+		_ = os.Remove("clientPrivate.pem")
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	//add client's cert into server's cert pool.
+	serverPool, err := caCertPool("clientCert.pem")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	//You also need to load the server’s certificate at this point instead of relying on
+	// the server’s ServeTLS method to do it for you
+	cert, err := tls.LoadX509KeyPair("serverCert.pem", "serverPrivate.pem")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	serverConfigs := &tls.Config{
+		//used by the server to present its certificate during the TLS handshake.
+		// It applies globally to all clients connecting to the server unless overridden dynamically
+		Certificates: []tls.Certificate{cert},
+
+		//the only reason you’re using the GetConfigForClient
+		// method is so you can retrieve the client’s IP from its hello information
+		GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
+			return &tls.Config{
+				// dynamic per-client configuration of certificates and other TLS settings.
+				// The method is called during the TLS handshake, allowing the server to select or
+				//customize the certificate based on the ClientHelloInfo.
+				Certificates: []tls.Certificate{cert},
+				// enforces client certificate validation. The server will reject connections
+				//from clients without valid certificates
+				ClientAuth: tls.RequireAndVerifyClientCert,
+				//Specifies the trusted CA pool (serverPool), used to validate client certificates.
+				ClientCAs:                serverPool,
+				CurvePreferences:         []tls.CurveID{tls.CurveP256},
+				MinVersion:               tls.VersionTLS13,
+				PreferServerCipherSuites: true,
+				// custom client certificate verification process in the VerifyPeerCertificate callback
+				VerifyPeerCertificate: func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+					// defines the rules (opts) to verify client certificates
+					opts := x509.VerifyOptions{
+						KeyUsages: []x509.ExtKeyUsage{
+							//Ensures the certificate is meant for client authentication
+							x509.ExtKeyUsageClientAuth,
+						},
+						//The server uses this pool as its trusted certificate source during verification.
+						Roots: serverPool,
+					}
+
+					ip := strings.Split(hello.Conn.RemoteAddr().String(), ":")[0]
+
+					//Uses a reverse DNS lookup (net.LookupAddr) to find any associated hostnames for the client's IP.
+					hostnames, err := net.LookupAddr(ip)
+					if err != nil {
+						return fmt.Errorf("lookupAddr: %w", err)
+					}
+
+					hostnames = append(hostnames, ip)
+
+					//range over slice of certificate chains that the server received from the client.
+					//The client might send multiple certificate chains. We check each chain to find one that can be validated.
+					for _, chain := range verifiedChains {
+						// Intermediate certificates act as a "bridge" between the client's certificate
+						//and the trusted root certificates. Without them, the verification may fail because
+						//the client certificate doesn't directly match a trusted root.
+						opts.Intermediates = x509.NewCertPool()
+						//Each chain is a slice of certificates, starting from the client's certificate (chain[0])
+						//to intermediate certificates (chain[1:]).
+						for _, cert := range chain[1:] {
+							opts.Intermediates.AddCert(cert)
+						}
+
+						for _, hostname := range hostnames {
+							opts.DNSName = hostname //assign the hostname or opts
+							//and see it verifies.
+							_, err = chain[0].Verify(opts)
+							if err == nil {
+								//verified
+								return nil
+							}
+						}
+					}
+
+					return errors.New("client authentication failed")
+				},
+			}, nil
+		},
+	}
+	serverAddress := "localhost:44443"
+	server := NewTLSServer(ctx, serverAddress, 0, serverConfigs)
+	done := make(chan struct{})
+
+	go func() {
+		err := server.ListenAndServeTLS("serverCert.pem", "serverPrivate.pem")
+		if err != nil && !strings.Contains(err.Error(), "use of closed network connection") {
+			t.Error(err)
+			return
+		}
+
+		done <- struct{}{}
+	}()
+
+	server.Ready()
+
+	//take care client
+	clientPool, err := caCertPool("serverCert.pem")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	clientCert, err := tls.LoadX509KeyPair("clientCert.pem", "clientPrivate.pem")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	conn, err := tls.Dial("tcp", serverAddress, &tls.Config{
+		//client will present this certificate upon request to server.
+		Certificates:     []tls.Certificate{clientCert},
+		CurvePreferences: []tls.CurveID{tls.CurveP256},
+		MinVersion:       tls.VersionTLS13,
+		//the client will trust only server certificates signed by serverCert.pem.
+		RootCAs: clientPool,
+	})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	hello := []byte("hello")
+
+	_, err = conn.Write(hello)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	b := make([]byte, 1024)
+
+	n, err := conn.Read(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if actual := b[:n]; !bytes.Equal(hello, actual) {
+		t.Fatalf("expected %q; actual %q", hello, actual)
+	}
+	err = conn.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	<-done
+
 }
