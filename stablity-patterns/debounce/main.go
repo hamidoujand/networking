@@ -26,6 +26,10 @@ limits according to time period.
 type Circuit func(ctx context.Context) (string, error)
 
 // DebounceVersion1 It prevents rapid consecutive executions of circuit by enforcing a "cooldown period" (d) between calls.
+// pattern designed to delay function execution until after a defined period (d) has passed without further calls,
+// while also handling concurrency
+// If this returned function (Circuit) is called repeatedly, it postpones the actual execution (circuit(ctx))
+// until a specified duration (d) has passed since the last call.
 func DebounceVersion1(circuit Circuit, d time.Duration) Circuit {
 	//starts with the zero value (time.Time{}) and is updated every time the circuit runs.
 	var threshold time.Time
@@ -57,6 +61,7 @@ func DebounceVersion1(circuit Circuit, d time.Duration) Circuit {
 	}
 }
 
+// DebounceVersion2 multiple calls come in quick succession, only the last call's result will be returned after the debounce delay.
 func DebounceVersion2(circuit Circuit, d time.Duration) Circuit {
 	//tracks the earliest time when the circuit function can execute again. It is initialized to the current time.
 	threshold := time.Now()
@@ -79,6 +84,7 @@ func DebounceVersion2(circuit Circuit, d time.Duration) Circuit {
 		threshold = time.Now().Add(d)
 		//Ensures the following initialization logic runs only once, regardless of how many times the returned function is called
 		once.Do(func() {
+			//triggering every 100ms to check whether the debounce delay has elapsed.
 			ticker = time.NewTicker(time.Millisecond * 100)
 
 			go func() {
@@ -90,25 +96,25 @@ func DebounceVersion2(circuit Circuit, d time.Duration) Circuit {
 
 					m.Unlock()
 				}()
-			}()
 
-			for {
-				select {
-				case <-ticker.C:
-					m.Lock()
-					if time.Now().After(threshold) {
-						result, err = circuit(ctx)
+				for {
+					select {
+					case <-ticker.C:
+						m.Lock()
+						if time.Now().After(threshold) {
+							result, err = circuit(ctx)
+							m.Unlock()
+							return
+						}
+						m.Unlock()
+					case <-ctx.Done():
+						m.Lock()
+						result, err = "", ctx.Err()
 						m.Unlock()
 						return
 					}
-					m.Unlock()
-				case <-ctx.Done():
-					m.Lock()
-					result, err = "", ctx.Err()
-					m.Unlock()
-					return
 				}
-			}
+			}()
 		})
 		return result, err
 	}
