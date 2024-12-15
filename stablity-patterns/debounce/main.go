@@ -82,12 +82,14 @@ func DebounceVersion2(circuit Circuit, d time.Duration) Circuit {
 			ticker = time.NewTicker(time.Millisecond * 100)
 
 			go func() {
-				m.Lock()
+				defer func() {
+					m.Lock()
 
-				ticker.Stop()
-				once = sync.Once{}
+					ticker.Stop()
+					once = sync.Once{}
 
-				m.Unlock()
+					m.Unlock()
+				}()
 			}()
 
 			for {
