@@ -56,3 +56,58 @@ func DebounceVersion1(circuit Circuit, d time.Duration) Circuit {
 		return result, err
 	}
 }
+
+func DebounceVersion2(circuit Circuit, d time.Duration) Circuit {
+	//tracks the earliest time when the circuit function can execute again. It is initialized to the current time.
+	threshold := time.Now()
+	//periodic timer (time.Ticker) that checks whether the cooldown period has passed.
+	var ticker *time.Ticker
+	//caches
+	var result string
+	var err error
+	//ensures the background polling logic (using the ticker) is initialized only once,
+	//no matter how many times the returned function is called.
+	var once sync.Once
+
+	var m sync.Mutex
+
+	return func(ctx context.Context) (string, error) {
+		m.Lock()
+		defer m.Unlock()
+		//Every call to the returned function updates threshold to the current time + d (the debounce period).
+		//This ensures that the circuit cannot execute until the cooldown period expires.
+		threshold = time.Now().Add(d)
+		//Ensures the following initialization logic runs only once, regardless of how many times the returned function is called
+		once.Do(func() {
+			ticker = time.NewTicker(time.Millisecond * 100)
+
+			go func() {
+				m.Lock()
+
+				ticker.Stop()
+				once = sync.Once{}
+
+				m.Unlock()
+			}()
+
+			for {
+				select {
+				case <-ticker.C:
+					m.Lock()
+					if time.Now().After(threshold) {
+						result, err = circuit(ctx)
+						m.Unlock()
+						return
+					}
+					m.Unlock()
+				case <-ctx.Done():
+					m.Lock()
+					result, err = "", ctx.Err()
+					m.Unlock()
+					return
+				}
+			}
+		})
+		return result, err
+	}
+}
