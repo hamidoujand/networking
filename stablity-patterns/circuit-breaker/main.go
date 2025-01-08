@@ -110,10 +110,13 @@ func Breaker(circuit Circuit, failureThreshold int) Circuit {
 		if d >= 0 {
 			//backoff is triggered.
 			shouldRetryAt := lastAttempt.Add(time.Second * 2 << d)
+			//If the current time is still within the cooling-off period, return a "service unavailable" error.
 			if !time.Now().After(shouldRetryAt) {
 				m.RUnlock()
+				//still in cooling-off situation, no more request to service.
 				return "", errors.New("service unreachable")
 			}
+			//else go ahead and make a request.
 		}
 		m.RUnlock()
 

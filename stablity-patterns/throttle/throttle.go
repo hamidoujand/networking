@@ -1,60 +1,73 @@
-package throttle
+package main
 
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 )
 
-//Throttle limits the frequency of a function call to some maximum number of
-//invocations per unit of time
-
-type Effector func(context.Context) (string, error)
+type Effector func(ctx context.Context) (string, error)
 
 func Throttle(effector Effector, max int, refill int, d time.Duration) Effector {
+	// Tracks the number of available "slots" for calls. Initially set to the max value.
+	// Each call to the throttled function decreases the token count.
+	tokens := max
+	// Ensures the refill logic (explained below) is initialized only once, even if the Throttle function is called multiple times.
 	var once sync.Once
 
-	//Tracks the number of available tokens. Initially set to max, which is the maximum allowed calls at any time.
-	var tokens = max
-
 	return func(ctx context.Context) (string, error) {
-		//This prevents unnecessary processing if the operation is already invalid.
-		if ctx.Err() != nil {
-			return "", ctx.Err()
-		}
-
-		//the goroutine to refill tokens starts only once.
-		//Even if multiple requests are made, this block runs only on the first call.
+		//refill logic
 		once.Do(func() {
-			//Generates periodic ticks every d duration to trigger the token refill logic.
-			ticker := time.NewTicker(d)
+			ticker := time.NewTicker(d) //create a ticker one time only
+			//so now every "d" the ticker will refill to tokens by a fixed amount
 
+			//create a goroutine one time
 			go func() {
 				defer ticker.Stop()
 
 				for {
 					select {
 					case <-ctx.Done():
-						return
+						return //so the timer also gets cleaned.
 					case <-ticker.C:
-						//The tokens are refilled by adding refill tokens
+						//Add refill tokens to the current tokens.
 						t := tokens + refill
-						//If this exceeds max, the tokens are capped at max.
 						if t > max {
+							//If tokens exceeds max, reset it to max to ensure we don’t exceed the maximum allowed calls.
 							t = max
 						}
-						//assign refilled tokens
 						tokens = t
 					}
 				}
 			}()
 		})
-		//no token available, this fn call will return an error
+
 		if tokens <= 0 {
-			return "", errors.New("to many fn calls")
+			return "", errors.New("too many calls")
 		}
+
 		tokens--
+		//do the call
 		return effector(ctx)
+	}
+}
+
+func exampleEffector(ctx context.Context) (string, error) {
+	return "success", nil
+}
+
+func main() {
+	withThrottle := Throttle(exampleEffector, 3, 1, time.Second)
+	for range 5 {
+		resp, err := withThrottle(context.Background())
+		if err != nil {
+			fmt.Println("Err:", err)
+		} else {
+			fmt.Println("Result:", resp)
+		}
+
+		time.Sleep(time.Millisecond * 300)
 	}
 }
